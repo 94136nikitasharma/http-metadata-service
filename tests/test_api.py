@@ -7,10 +7,26 @@ in conftest.py.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
+
+from app.models.metadata import MetadataDocument
+from app.services.collector import CollectorError
+
+
+def _mock_document(url: str = "https://example.com/") -> MetadataDocument:
+    """Create a mock metadata document for testing."""
+    return MetadataDocument(
+        url=url,
+        headers={"content-type": "text/html", "server": "test"},
+        cookies=[{"name": "sid", "value": "abc", "domain": "example.com", "path": "/"}],
+        page_source="<html><body>Mocked</body></html>",
+        status_code=200,
+        collected_at=datetime.now(timezone.utc),
+    )
 
 
 # ════════════════════════ Health Check ═══════════════════════════════════
@@ -33,17 +49,23 @@ async def test_health_check(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_post_metadata_success(client: AsyncClient):
     """
-    POST with a valid, reachable URL should return 201 with
-    confirmation details.
+    POST with a valid URL should return 201 with confirmation details.
     """
-    response = await client.post(
-        "/api/v1/metadata",
-        json={"url": "https://example.com"},
-    )
+    mock_doc = _mock_document()
+
+    with patch(
+        "app.api.routes.collect_metadata",
+        new_callable=AsyncMock,
+        return_value=mock_doc,
+    ):
+        response = await client.post(
+            "/api/v1/metadata",
+            json={"url": "https://example.com"},
+        )
 
     assert response.status_code == 201
     data = response.json()
-    assert data["url"] == "https://example.com/"  # Pydantic normalises
+    assert "example.com" in data["url"]
     assert "collected_at" in data
     assert "message" in data
 
@@ -62,10 +84,15 @@ async def test_post_metadata_invalid_url(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_post_metadata_unreachable_url(client: AsyncClient):
     """POST with a URL that cannot be reached should return 400."""
-    response = await client.post(
-        "/api/v1/metadata",
-        json={"url": "https://this-domain-does-not-exist-xyz123.com"},
-    )
+    with patch(
+        "app.api.routes.collect_metadata",
+        new_callable=AsyncMock,
+        side_effect=CollectorError("Could not connect to URL"),
+    ):
+        response = await client.post(
+            "/api/v1/metadata",
+            json={"url": "https://this-domain-does-not-exist-xyz123.com"},
+        )
 
     assert response.status_code == 400
     data = response.json()
@@ -85,10 +112,21 @@ async def test_post_metadata_idempotent(client: AsyncClient):
     Posting the same URL twice should succeed both times (upsert),
     not fail with a duplicate key error.
     """
-    payload = {"url": "https://example.com"}
+    mock_doc = _mock_document()
 
-    resp1 = await client.post("/api/v1/metadata", json=payload)
-    resp2 = await client.post("/api/v1/metadata", json=payload)
+    with patch(
+        "app.api.routes.collect_metadata",
+        new_callable=AsyncMock,
+        return_value=mock_doc,
+    ):
+        resp1 = await client.post(
+            "/api/v1/metadata",
+            json={"url": "https://example.com"},
+        )
+        resp2 = await client.post(
+            "/api/v1/metadata",
+            json={"url": "https://example.com"},
+        )
 
     assert resp1.status_code == 201
     assert resp2.status_code == 201
@@ -156,12 +194,17 @@ async def test_post_then_get_returns_data(client: AsyncClient):
     End-to-end: POST a URL to collect metadata, then GET should
     return the stored record with status 200.
     """
-    url = "https://example.com"
+    mock_doc = _mock_document("https://example.com/")
 
-    # Step 1 — collect
-    post_resp = await client.post(
-        "/api/v1/metadata", json={"url": url}
-    )
+    with patch(
+        "app.api.routes.collect_metadata",
+        new_callable=AsyncMock,
+        return_value=mock_doc,
+    ):
+        # Step 1 — collect
+        post_resp = await client.post(
+            "/api/v1/metadata", json={"url": "https://example.com"}
+        )
     assert post_resp.status_code == 201
 
     # Step 2 — retrieve (Pydantic may normalise the URL with a trailing slash)

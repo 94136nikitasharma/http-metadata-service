@@ -23,17 +23,6 @@ from app.main import app
 pytest_plugins = ("pytest_asyncio",)
 
 
-# ──────────────────────────── Event Loop ────────────────────────────────
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create a single event loop for the entire test session."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 # ──────────────────────────── Database ──────────────────────────────────
 
 TEST_DB_NAME = "metadata_inventory_test"
@@ -49,6 +38,9 @@ async def test_db():
     """
     client = AsyncIOMotorClient(settings.mongo_uri)
     db = client[TEST_DB_NAME]
+
+    # Drop first to ensure clean state
+    await client.drop_database(TEST_DB_NAME)
 
     yield db
 
@@ -68,11 +60,14 @@ async def client(test_db) -> AsyncGenerator[AsyncClient, None]:
     Patches the database module to use the test database so that
     tests run against an isolated environment.
     """
-    # Monkey-patch the database getter to return our test DB
+    # Monkey-patch the database module to return our test DB
     import app.database as db_module
 
     original_get_db = db_module.get_database
-    db_module.get_database = lambda: test_db
+    original_db = db_module._database
+
+    # Set the module-level _database directly so get_database() works
+    db_module._database = test_db
 
     # Ensure indexes on the test database
     from app.repositories.metadata_repo import MetadataRepository
@@ -88,7 +83,7 @@ async def client(test_db) -> AsyncGenerator[AsyncClient, None]:
         yield ac
 
     # Restore original
-    db_module.get_database = original_get_db
+    db_module._database = original_db
 
 
 # ──────────────────────── Seed Helpers ──────────────────────────────────
@@ -101,6 +96,12 @@ async def seeded_db(test_db):
 
     Returns the seeded document dict for assertions.
     """
+    from app.repositories.metadata_repo import MetadataRepository
+
+    # Ensure indexes via the repository (uses the same index name)
+    repo = MetadataRepository(test_db)
+    await repo.ensure_indexes()
+
     doc = {
         "url": "https://example.com",
         "headers": {"content-type": "text/html; charset=UTF-8"},
@@ -117,8 +118,5 @@ async def seeded_db(test_db):
         "collected_at": datetime.now(timezone.utc),
     }
     await test_db["url_metadata"].insert_one(doc.copy())
-
-    # Also ensure the unique index exists
-    await test_db["url_metadata"].create_index("url", unique=True)
 
     return doc
