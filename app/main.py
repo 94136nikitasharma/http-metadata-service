@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from app.api.routes import router as metadata_router
 from app.config import settings
@@ -85,6 +86,18 @@ app.add_middleware(
 
 # Register routes
 app.include_router(metadata_router)
+
+
+# ──────────────────────── Root Redirect ─────────────────────────────────
+
+
+@app.get(
+    "/",
+    include_in_schema=False,
+)
+async def root_redirect():
+    """Redirect the root URL to the interactive API documentation."""
+    return RedirectResponse(url="/docs")
 
 
 # ──────────────────────────── Health Check ──────────────────────────────
