@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 _in_flight: set[str] = set()
 
 
+def get_pending_count() -> int:
+    """Return the number of URLs currently being fetched in the background."""
+    return len(_in_flight)
+
+
 def is_in_flight(url: str) -> bool:
     """Check whether a background fetch is already running for *url*."""
     return url in _in_flight
@@ -51,7 +56,10 @@ def schedule_background_collection(url: str, repo: MetadataRepository) -> None:
         return
 
     _in_flight.add(url)
-    asyncio.create_task(_collect_and_store(url, repo))
+    task = asyncio.create_task(
+        _collect_and_store(url, repo),
+        name=f"bg-collect-{url}",  # Named task for easier debugging
+    )
     logger.info("Background collection scheduled for %s", url)
 
 

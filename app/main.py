@@ -6,16 +6,18 @@ and registers lifecycle hooks (database connection) and API routes.
 """
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.api.routes import router as metadata_router
 from app.config import settings
 from app.database import close_mongo_connection, connect_to_mongo, get_database
 from app.repositories.metadata_repo import MetadataRepository
+from app.services.background import get_pending_count
 
 # ──────────────────────────── Logging ───────────────────────────────────
 
@@ -37,7 +39,7 @@ async def lifespan(app: FastAPI):
     Manage application startup and shutdown.
 
     On startup:
-      - Connect to MongoDB
+      - Connect to MongoDB (with retry/backoff)
       - Ensure required indexes exist
 
     On shutdown:
@@ -53,7 +55,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown — log any pending background tasks
+    pending = get_pending_count()
+    if pending > 0:
+        logger.warning(
+            "Shutting down with %d background task(s) still in-flight.",
+            pending,
+        )
     logger.info("Shutting down …")
     await close_mongo_connection()
 
@@ -75,6 +83,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+
+# ──────────────────────── Middleware ────────────────────────────────────
+
 # CORS — permissive for development; tighten in production
 app.add_middleware(
     CORSMiddleware,
@@ -83,6 +94,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """
+    Attach a unique request ID to every incoming request.
+
+    This ID is included in the response headers (X-Request-ID) for
+    traceability and debugging in distributed environments.
+    """
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    request.state.request_id = request_id
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
 
 # Register routes
 app.include_router(metadata_router)
@@ -107,10 +135,30 @@ async def root_redirect():
     "/health",
     tags=["Infrastructure"],
     summary="Service health check",
+    description=(
+        "Performs a deep health check by pinging the MongoDB server. "
+        "Returns the service status and database connectivity state."
+    ),
 )
 async def health_check():
     """
-    Returns a simple status indicator for load balancers and
-    container orchestration tools.
+    Deep health check that verifies both the API and database
+    are operational.  Used by Docker HEALTHCHECK and load balancers.
     """
-    return {"status": "healthy", "service": "http-metadata-inventory"}
+    try:
+        db = get_database()
+        # Actually ping MongoDB to verify connectivity
+        await db.command("ping")
+        db_status = "connected"
+    except Exception:
+        db_status = "disconnected"
+
+    status = "healthy" if db_status == "connected" else "degraded"
+    pending_tasks = get_pending_count()
+
+    return {
+        "status": status,
+        "service": "http-metadata-inventory",
+        "database": db_status,
+        "pending_background_tasks": pending_tasks,
+    }

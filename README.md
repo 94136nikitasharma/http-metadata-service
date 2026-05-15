@@ -1,48 +1,19 @@
 # HTTP Metadata Inventory Service
 
-A high-performance RESTful service that collects, stores, and retrieves HTTP metadata (headers, cookies, page source) for any given URL. Built with **FastAPI**, **MongoDB**, and **Docker Compose**.
+A high-performance, production-ready RESTful service that collects, stores, and retrieves HTTP metadata (headers, cookies, page source) for any given URL. Built with **FastAPI**, **MongoDB**, and **Docker Compose**.
 
 ## Features
 
 - **Synchronous Collection** — `POST` a URL to immediately fetch and store its metadata
 - **Inventory Lookup** — `GET` stored metadata with automatic background fetching on cache misses
-- **Asynchronous Background Worker** — Non-blocking metadata collection using `asyncio` tasks
-- **Request Deduplication** — In-flight tracking prevents duplicate background fetches
-- **Auto-generated API Documentation** — Interactive Swagger UI at `/docs`
-- **Comprehensive Test Suite** — Unit and integration tests with `pytest`
-- **One-command Setup** — `docker-compose up` starts everything
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│                   FastAPI Application                │
-│                                                      │
-│  ┌──────────┐    ┌──────────────┐    ┌────────────┐  │
-│  │  Routes   │───▸│   Services   │───▸│ Repository │  │
-│  │ (API)     │    │  (Business)  │    │  (Data)    │  │
-│  └──────────┘    └──────────────┘    └─────┬──────┘  │
-│       │               │                    │         │
-│       │          ┌────┴─────┐              │         │
-│       │          │Background│              │         │
-│       │          │ Worker   │──────────────┘         │
-│       │          └──────────┘                        │
-└───────┼──────────────────────────────────────────────┘
-        │                                    │
-    HTTP Clients                         MongoDB
-```
-
-**Layers:**
-
-| Layer | Responsibility | Key Files |
-|-------|---------------|-----------|
-| **API** | Request parsing, validation, HTTP response mapping | `app/api/routes.py` |
-| **Services** | HTTP metadata collection, background task orchestration | `app/services/collector.py`, `app/services/background.py` |
-| **Repository** | MongoDB CRUD, index management | `app/repositories/metadata_repo.py` |
-| **Models** | Pydantic schemas for validation and serialisation | `app/models/metadata.py` |
-| **Config** | Environment-based settings | `app/config.py` |
+- **Asynchronous Background Worker** — Non-blocking metadata collection using `asyncio.create_task()`
+- **Request Deduplication** — In-flight URL tracking prevents duplicate background fetches
+- **System Resilience** — MongoDB connection retry with exponential backoff for container startup delays
+- **Request Tracing** — Unique `X-Request-ID` header on every response for observability
+- **Deep Health Checks** — `/health` endpoint verifies both API and database connectivity
+- **Auto-generated API Docs** — Interactive Swagger UI at `/docs`
+- **Comprehensive Test Suite** — 28 tests covering unit, integration, and edge cases
+- **One-command Setup** — `docker compose up` starts everything
 
 ---
 
@@ -50,25 +21,75 @@ A high-performance RESTful service that collects, stores, and retrieves HTTP met
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
+- [Docker](https://docs.docker.com/get-docker/) (with Docker Compose)
 
 ### Run the Service
 
 ```bash
-# Clone the repository
-git clone <repository-url>
+git clone https://github.com/94136nikitasharma/http-metadata-service.git
 cd http-metadata-service
-
-# Start both the API and MongoDB
-docker-compose up --build
+docker compose up --build
 ```
 
 The API will be available at **http://localhost:8000**.
 
+> **Note:** No `.env` file or manual configuration is needed — all defaults are baked into `docker-compose.yml`.
+
+### Using the Makefile
+
+```bash
+make up          # Start services
+make test        # Run full test suite
+make logs        # Tail service logs
+make down        # Stop and clean up
+make help        # Show all available commands
+```
+
 ### Interactive API Documentation
 
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+| URL | Description |
+|-----|-------------|
+| http://localhost:8000/docs | Swagger UI (interactive testing) |
+| http://localhost:8000/redoc | ReDoc (read-only documentation) |
+| http://localhost:8000/health | Deep health check (API + MongoDB) |
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      FastAPI Application                     │
+│                                                              │
+│  ┌─────────────┐    ┌──────────────┐    ┌────────────────┐   │
+│  │   Routes     │───▸│   Services   │───▸│   Repository   │   │
+│  │  (Transport) │    │  (Business)  │    │    (Data)      │   │
+│  └─────────────┘    └──────────────┘    └───────┬────────┘   │
+│        │                  │                     │            │
+│        │             ┌────┴──────┐              │            │
+│        │             │ Background│              │            │
+│        │             │  Worker   │──────────────┘            │
+│        │             └───────────┘                           │
+│        │                                                     │
+│  ┌─────┴──────────────────────────────────────────────────┐  │
+│  │            Middleware (Request ID, CORS)                │  │
+│  └────────────────────────────────────────────────────────┘  │
+└────────┬─────────────────────────────────────────┬───────────┘
+         │                                         │
+     HTTP Clients                              MongoDB
+```
+
+**Layer Responsibilities:**
+
+| Layer | Module | Responsibility |
+|-------|--------|----------------|
+| **Transport** | `app/api/routes.py` | Request validation, HTTP response mapping |
+| **Business Logic** | `app/services/collector.py` | HTTP metadata extraction via `httpx` |
+| **Orchestration** | `app/services/background.py` | Async task scheduling with deduplication |
+| **Data Access** | `app/repositories/metadata_repo.py` | MongoDB CRUD with indexed lookups |
+| **Models** | `app/models/metadata.py` | Pydantic schemas for validation & serialisation |
+| **Configuration** | `app/config.py` | Environment-based settings via `pydantic-settings` |
+| **Infrastructure** | `app/database.py` | Connection pooling with retry/backoff |
 
 ---
 
@@ -85,19 +106,26 @@ Collect and store metadata for a URL.
 }
 ```
 
-**Response (201 Created):**
+**Response `201 Created`:**
 ```json
 {
   "message": "Metadata collected and stored successfully.",
   "url": "https://example.com/",
-  "collected_at": "2025-01-15T10:30:00.000Z"
+  "collected_at": "2026-05-14T10:30:00.000Z"
 }
 ```
 
-**Error (400 Bad Request):**
+**Error `400 Bad Request`** — URL unreachable / timeout:
 ```json
 {
   "detail": "Request timed out for URL: https://unreachable-site.com"
+}
+```
+
+**Error `422 Unprocessable Entity`** — Malformed URL:
+```json
+{
+  "detail": [{"msg": "Invalid URL", "type": "url_parsing"}]
 }
 ```
 
@@ -107,13 +135,13 @@ Collect and store metadata for a URL.
 
 Retrieve stored metadata for a URL.
 
-**If found — Response (200 OK):**
+**Cache Hit — `200 OK`:**
 ```json
 {
-  "url": "https://example.com",
+  "url": "https://example.com/",
   "headers": {
     "content-type": "text/html; charset=UTF-8",
-    "server": "ECAcc (sed/58EA)"
+    "server": "cloudflare"
   },
   "cookies": [
     {
@@ -125,11 +153,11 @@ Retrieve stored metadata for a URL.
   ],
   "page_source": "<!doctype html>...",
   "status_code": 200,
-  "collected_at": "2025-01-15T10:30:00.000Z"
+  "collected_at": "2026-05-14T10:30:00.000Z"
 }
 ```
 
-**If not found — Response (202 Accepted):**
+**Cache Miss — `202 Accepted`:**
 ```json
 {
   "message": "Metadata not found in inventory. A background collection has been initiated. Please retry shortly.",
@@ -137,80 +165,86 @@ Retrieve stored metadata for a URL.
 }
 ```
 
-A background task is automatically triggered to collect and store the metadata. Subsequent `GET` requests for the same URL will return the full dataset once collection completes.
+> On a cache miss, a background task is automatically triggered. Subsequent `GET` requests for the same URL will return the full metadata once collection completes (typically within seconds).
 
 ---
 
 ### `GET /health`
 
-Health check for container orchestration.
+Deep health check verifying API and database connectivity.
 
-**Response (200 OK):**
 ```json
 {
   "status": "healthy",
-  "service": "http-metadata-inventory"
+  "service": "http-metadata-inventory",
+  "database": "connected",
+  "pending_background_tasks": 0
 }
 ```
 
 ---
 
+## Background Worker Design
+
+The background collection system satisfies the architectural constraints specified in the challenge:
+
+| Constraint | Implementation |
+|-----------|----------------|
+| **No self-HTTP calls** | Uses `asyncio.create_task()` — runs on the same event loop |
+| **No external workers** | No Celery, Redis, or message queues needed |
+| **Non-blocking** | API returns `202 Accepted` immediately; collection runs independently |
+| **Deduplication** | In-memory `set` tracks in-flight URLs to prevent concurrent duplicate fetches |
+| **Result persistence** | Data is upserted into MongoDB; available for all subsequent `GET` requests |
+| **Error isolation** | Failures are logged but never crash the application |
+
+---
+
 ## Configuration
 
-All settings are managed via environment variables (see `.env.example`):
+All settings use sensible defaults and can be overridden via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MONGO_URI` | `mongodb://mongodb:27017` | MongoDB connection string |
 | `MONGO_DB` | `metadata_inventory` | Database name |
 | `REQUEST_TIMEOUT` | `15` | HTTP request timeout (seconds) |
-| `MAX_CONNECTIONS` | `20` | HTTP connection pool limit |
-| `APP_ENV` | `development` | Application environment |
-| `LOG_LEVEL` | `info` | Logging level |
+| `MAX_CONNECTIONS` | `20` | HTTP client connection pool limit |
+| `APP_ENV` | `production` | Application environment |
+| `LOG_LEVEL` | `info` | Logging level (`debug`, `info`, `warning`, `error`) |
 
 ---
 
 ## Testing
 
-### Run Tests with Docker (Recommended)
-
-The test suite requires a running MongoDB instance. The easiest way is to start MongoDB via Docker Compose and run tests inside the container:
+### Run All Tests
 
 ```bash
-# Start MongoDB
-docker-compose up -d mongodb
+# Inside Docker (recommended — includes MongoDB)
+make test
 
-# Run tests in a separate container
-docker-compose run --rm api python -m pytest tests/ -v
+# Or directly:
+docker compose run --rm api python -m pytest tests/ -v
 ```
 
-### Run Tests Locally
+### Test Structure
 
-If you have MongoDB running locally:
-
-```bash
-# Create a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set MongoDB URI for local instance
-export MONGO_URI=mongodb://localhost:27017
-
-# Run the test suite
-pytest tests/ -v
+```
+tests/
+├── conftest.py           # Fixtures: isolated test DB, patched app client
+├── test_api.py           # 10 integration tests — full request lifecycle
+├── test_collector.py     #  5 unit tests — HTTP fetching & error handling
+├── test_repository.py    #  7 unit tests — MongoDB CRUD & index behaviour
+└── test_background.py    #  6 unit tests — task scheduling & deduplication
+                          # ─────────────────────────────────────────────
+                          # 28 tests total
 ```
 
-### Test Coverage
-
-| Test File | What It Covers |
-|-----------|---------------|
-| `test_api.py` | Integration tests — full request lifecycle, endpoint behaviour, error responses |
-| `test_collector.py` | Unit tests — HTTP fetching, parsing, timeout/connection error handling |
-| `test_repository.py` | Unit tests — MongoDB CRUD, upsert, index behaviour |
-| `test_background.py` | Unit tests — Task scheduling, deduplication, error cleanup |
+| Category | Tests | What It Covers |
+|----------|-------|---------------|
+| **API Integration** | 10 | POST success/failure, GET cache hit/miss, POST→GET lifecycle, validation errors |
+| **Collector** | 5 | Successful fetch, no cookies, timeout, connection error, redirect loops |
+| **Repository** | 7 | Insert, find, upsert (create & update), delete, index idempotency |
+| **Background Worker** | 6 | Scheduling, deduplication, success persistence, failure cleanup |
 
 ---
 
@@ -220,32 +254,29 @@ pytest tests/ -v
 http-metadata-service/
 ├── docker-compose.yml          # API + MongoDB orchestration
 ├── Dockerfile                  # Multi-stage build (builder → runtime)
-├── requirements.txt            # Python dependencies
+├── Makefile                    # Developer convenience commands
+├── .dockerignore               # Optimised Docker build context
+├── requirements.txt            # Pinned Python dependencies
 ├── pyproject.toml              # Pytest configuration
-├── .env.example                # Environment variable template
+├── .env.example                # Environment variable documentation
 ├── .gitignore
 ├── README.md
 ├── app/
 │   ├── __init__.py
-│   ├── main.py                 # FastAPI app, lifespan, CORS
-│   ├── config.py               # Pydantic Settings
-│   ├── database.py             # Motor async MongoDB client
+│   ├── main.py                 # FastAPI app, middleware, lifespan hooks
+│   ├── config.py               # Pydantic Settings (env-based)
+│   ├── database.py             # Motor client with connection retry/backoff
 │   ├── models/
-│   │   ├── __init__.py
-│   │   └── metadata.py         # Request/response Pydantic models
+│   │   └── metadata.py         # 7 Pydantic models (request/response/internal)
 │   ├── services/
-│   │   ├── __init__.py
-│   │   ├── collector.py        # HTTP metadata collection (httpx)
+│   │   ├── collector.py        # HTTP metadata collection via httpx
 │   │   └── background.py       # Async background task orchestration
 │   ├── repositories/
-│   │   ├── __init__.py
-│   │   └── metadata_repo.py    # MongoDB CRUD operations
+│   │   └── metadata_repo.py    # MongoDB CRUD with unique URL indexing
 │   └── api/
-│       ├── __init__.py
 │       └── routes.py           # POST & GET endpoint handlers
 └── tests/
-    ├── __init__.py
-    ├── conftest.py              # Fixtures, test DB setup
+    ├── conftest.py              # Test fixtures & database isolation
     ├── test_api.py              # Integration tests
     ├── test_collector.py        # Collector unit tests
     ├── test_repository.py       # Repository unit tests
@@ -256,24 +287,24 @@ http-metadata-service/
 
 ## Design Decisions
 
-1. **Motor (async MongoDB driver)** — Matches FastAPI's async-first architecture for non-blocking I/O.
-
-2. **httpx over requests** — Native `async/await` support, connection pooling, and modern API for collecting metadata.
-
-3. **`asyncio.create_task()` for background work** — Lightweight, no external dependencies (Celery, Redis). The task runs on the same event loop, avoiding the complexity of distributed workers for this use case.
-
-4. **In-flight URL deduplication** — An in-memory `set` tracks URLs currently being fetched in the background. This prevents redundant network requests when multiple `GET` calls hit the same cache miss concurrently.
-
-5. **Repository pattern** — Isolates MongoDB-specific logic behind a clean interface, making it easy to swap databases or add caching layers in the future.
-
-6. **API versioning (`/api/v1/`)** — Demonstrates forward-thinking design; new API versions can be introduced without breaking existing consumers.
-
-7. **Multi-stage Docker build** — Keeps the final image small by excluding build tools and caches from the runtime layer.
-
-8. **Non-root container user** — Security best practice for production container deployments.
+| Decision | Rationale |
+|----------|-----------|
+| **Motor (async MongoDB driver)** | Matches FastAPI's async-first architecture for non-blocking I/O |
+| **httpx over requests** | Native `async/await` support, connection pooling, and redirect handling |
+| **`asyncio.create_task()` for background work** | Lightweight, no external dependencies — task runs on the same event loop |
+| **In-flight deduplication via `set`** | Prevents redundant network requests on concurrent cache misses |
+| **Repository pattern** | Isolates MongoDB logic behind a clean interface; easy to swap or extend |
+| **API versioning (`/api/v1/`)** | Forward-compatible; new versions don't break existing consumers |
+| **Multi-stage Docker build** | Final image excludes build tools (~60% smaller) |
+| **Non-root container user** | Security best practice for production deployments |
+| **Connection retry with backoff** | Handles Docker Compose startup race conditions gracefully |
+| **Request ID middleware** | Enables end-to-end request tracing across services |
+| **Deep health check** | Verifies actual MongoDB connectivity, not just API liveness |
+| **Unique index on URL** | Guarantees fast O(log n) lookups as dataset grows |
+| **Upsert for writes** | Idempotent operations — safe for retries and concurrent access |
 
 ---
 
 ## License
 
-This project was created as part of a hiring challenge. All rights reserved.
+This project was created as part of a hiring challenge.

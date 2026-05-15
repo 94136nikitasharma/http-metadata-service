@@ -14,6 +14,7 @@ controllers responsible only for:
 import logging
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 
 from app.database import get_database
 from app.models.metadata import (
@@ -132,8 +133,6 @@ async def get_metadata(
 
     # Cache miss — schedule background collection and acknowledge
     schedule_background_collection(url, repo)
-
-    from fastapi.responses import JSONResponse
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
