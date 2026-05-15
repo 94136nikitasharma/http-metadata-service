@@ -1,14 +1,6 @@
 """
-API route handlers for the HTTP Metadata Inventory Service.
-
-This module defines the two core endpoints (POST and GET) and wires
-together the service and repository layers.  All business logic is
-delegated to dedicated modules — the routes themselves are thin
-controllers responsible only for:
-
-    1. Parsing and validating input (via Pydantic models).
-    2. Invoking the appropriate service/repository call.
-    3. Mapping the result to the correct HTTP response.
+API route handlers — thin controllers that wire together
+the service and repository layers.
 """
 
 import logging
@@ -34,11 +26,7 @@ router = APIRouter(prefix="/api/v1", tags=["Metadata"])
 
 
 def _get_repo() -> MetadataRepository:
-    """Convenience helper to obtain a repository instance."""
     return MetadataRepository(get_database())
-
-
-# ────────────────────────── POST /metadata ──────────────────────────────
 
 
 @router.post(
@@ -52,18 +40,14 @@ def _get_repo() -> MetadataRepository:
     summary="Collect metadata for a URL",
     description=(
         "Accepts a URL, fetches its HTTP headers, cookies, and page "
-        "source, then stores the result in the database.  Returns "
-        "the stored record on success."
+        "source, then stores the result in the database."
     ),
 )
 async def create_metadata(body: MetadataRequest) -> MetadataCreatedResponse:
-    """
-    Synchronously collect and persist metadata for the supplied URL.
-    """
+    """Synchronously collect and persist metadata for the given URL."""
     url = str(body.url)
     repo = _get_repo()
 
-    # Fetch metadata from the remote URL
     try:
         document = await collect_metadata(url)
     except CollectorError as exc:
@@ -72,7 +56,7 @@ async def create_metadata(body: MetadataRequest) -> MetadataCreatedResponse:
             detail=str(exc),
         ) from exc
 
-    # Persist (upsert to handle repeat submissions gracefully)
+    # upsert handles repeat submissions gracefully
     await repo.upsert(document)
 
     return MetadataCreatedResponse(
@@ -81,41 +65,28 @@ async def create_metadata(body: MetadataRequest) -> MetadataCreatedResponse:
     )
 
 
-# ────────────────────────── GET /metadata ───────────────────────────────
-
-
 @router.get(
     "/metadata",
     responses={
-        200: {
-            "model": MetadataResponse,
-            "description": "Metadata found in inventory",
-        },
-        202: {
-            "model": MetadataAcceptedResponse,
-            "description": "Metadata not found — background collection started",
-        },
+        200: {"model": MetadataResponse, "description": "Metadata found"},
+        202: {"model": MetadataAcceptedResponse, "description": "Background collection started"},
         400: {"model": ErrorResponse, "description": "Missing or invalid URL"},
     },
     summary="Retrieve metadata for a URL",
     description=(
-        "Looks up the metadata inventory for the given URL.  If a "
-        "record exists, the full dataset (headers, cookies, page "
-        "source) is returned immediately.  If not, a background "
-        "collection task is triggered and a 202 Accepted response "
-        "is returned so the client can retry later."
+        "Looks up stored metadata for the given URL. Returns it "
+        "immediately if found, otherwise triggers a background "
+        "collection and returns 202 Accepted."
     ),
 )
 async def get_metadata(
     url: str = Query(
         ...,
-        description="The URL to retrieve metadata for.",
+        description="The URL to look up.",
         examples=["https://example.com"],
     ),
 ):
-    """
-    Retrieve stored metadata or trigger a background fetch.
-    """
+    """Retrieve stored metadata or trigger a background fetch."""
     if not url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -123,15 +94,12 @@ async def get_metadata(
         )
 
     repo = _get_repo()
-
-    # Inventory check
     record = await repo.find_by_url(url)
 
     if record is not None:
-        # Cache hit — return the full metadata
         return MetadataResponse(**record)
 
-    # Cache miss — schedule background collection and acknowledge
+    # Not in DB yet — kick off background collection
     schedule_background_collection(url, repo)
 
     return JSONResponse(

@@ -1,16 +1,11 @@
 """
-Background task orchestration for asynchronous metadata collection.
+Background worker for async metadata collection.
 
-When the GET endpoint encounters a cache miss (URL not in the database),
-it delegates the actual fetch-and-store work to this module.  The key
-design constraints are:
-
-1.  The background task runs inside the **same event loop** as FastAPI,
-    using ``asyncio.create_task`` — no external worker or self-HTTP call.
-2.  An in-memory set tracks URLs that are currently being fetched,
-    preventing duplicate concurrent fetches for the same URL.
-3.  Failures are logged but never propagated to the caller; the API
-    response has already been sent by the time the task runs.
+When GET hits a cache miss, this module schedules a fetch-and-store
+task on the event loop. Key points:
+- Uses asyncio.create_task (no external worker, no self-HTTP calls)
+- Tracks in-flight URLs to avoid duplicate fetches
+- Errors are logged, never propagated (response is already sent)
 """
 
 import asyncio
@@ -21,35 +16,24 @@ from app.services.collector import CollectorError, collect_metadata
 
 logger = logging.getLogger(__name__)
 
-# URLs currently being fetched in the background.
-# This prevents multiple concurrent tasks for the same URL.
+# Tracks URLs currently being fetched — prevents duplicates
 _in_flight: set[str] = set()
 
 
 def get_pending_count() -> int:
-    """Return the number of URLs currently being fetched in the background."""
+    """How many background fetches are currently running."""
     return len(_in_flight)
 
 
 def is_in_flight(url: str) -> bool:
-    """Check whether a background fetch is already running for *url*."""
+    """Check if a background fetch is already running for this URL."""
     return url in _in_flight
 
 
 def schedule_background_collection(url: str, repo: MetadataRepository) -> None:
     """
-    Schedule an asynchronous metadata collection task.
-
-    If a fetch for the given URL is already in progress, this call is
-    a no-op (deduplication).  Otherwise a new ``asyncio.Task`` is
-    created on the running event loop.
-
-    Parameters
-    ----------
-    url : str
-        The URL whose metadata should be collected.
-    repo : MetadataRepository
-        Repository instance used to persist the collected data.
+    Kick off an async metadata collection task.
+    If the same URL is already being fetched, this is a no-op.
     """
     if url in _in_flight:
         logger.debug("Skipping duplicate background fetch for %s", url)
@@ -58,19 +42,15 @@ def schedule_background_collection(url: str, repo: MetadataRepository) -> None:
     _in_flight.add(url)
     task = asyncio.create_task(
         _collect_and_store(url, repo),
-        name=f"bg-collect-{url}",  # Named task for easier debugging
+        name=f"bg-collect-{url}",
     )
     logger.info("Background collection scheduled for %s", url)
 
 
 async def _collect_and_store(url: str, repo: MetadataRepository) -> None:
     """
-    Internal coroutine that performs the actual fetch → store cycle.
-
-    This runs independently of the request-response cycle.  On success
-    the metadata is persisted and subsequent GET requests will find it.
-    On failure the error is logged and the URL is removed from the
-    in-flight set so it can be retried on the next request.
+    Actually fetch the URL and persist the result.
+    Runs independently of the request-response cycle.
     """
     try:
         document = await collect_metadata(url)
@@ -78,15 +58,10 @@ async def _collect_and_store(url: str, repo: MetadataRepository) -> None:
         logger.info("Background collection completed for %s", url)
 
     except CollectorError as exc:
-        logger.error(
-            "Background collection failed for %s: %s", url, exc
-        )
+        logger.error("Background collection failed for %s: %s", url, exc)
 
     except Exception:
-        logger.exception(
-            "Unexpected error during background collection for %s", url
-        )
+        logger.exception("Unexpected error collecting %s", url)
 
     finally:
-        # Always release the in-flight lock
         _in_flight.discard(url)
